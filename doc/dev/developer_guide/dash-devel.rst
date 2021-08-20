@@ -719,6 +719,35 @@ It may not be possible to completely avoid an overlap.
 Unit tests should not be used to extensively click through components and E2E tests
 shouldn't be used to extensively test a single component of Angular.
 
+
+Visual Regression Testing
+~~~~~~~~~~~~~~~~~~~~~~~~~
+For visual regression testing, we use `Applitools Eyes
+<https://applitools.com/products-eyes/>`__ an AI powered automated  visual regression testing tool.
+Applitools integrates with our existing Cypress E2E tests.
+The tests are located at: `src/pybind/mgr/dashboard/frontend/cypress/integration/visualTests` and
+follow the naming convention: `<component-name>.vrt-spec.ts`.
+
+Running Visual Regression Tests Locally
+.......................................
+To run the tests locally, you'll need an Applitools API key, if you don't have one, you can sign up
+for a free account. After obtaining the API key, export it as an environment variable: `APPLITOOLS_API_KEY`.
+
+Now you can run the tests like normal cypress E2E tests, by either running cypress in
+headed mode in a browser or in headless mode by executing: `npx cypress open` or
+`npx cypress run` for headless mode.
+
+Capturing Screenshots
+.....................
+Baseline screenshots are the screenshots against which checkpoint screenshots,
+or the screenshots from your feature branch will be tested.
+
+To capture baseline screenshots, you can run the tests against the master branch,
+and then switch to your feature branch and run the tests again to capture checkpoint screenshots.
+
+Now to see your screenshots, login to applitools.com and on the landing page you'll be greeted with 
+applitools eyes test runner, where you can see all your screenshots.
+
 Best practices/guideline
 ........................
 
