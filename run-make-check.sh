@@ -44,7 +44,7 @@ function run() {
 
     CHECK_MAKEOPTS=${CHECK_MAKEOPTS:-$DEFAULT_MAKEOPTS}
     if in_jenkins; then
-        if ! ctest $CHECK_MAKEOPTS --no-compress-output --output-on-failure -T Test; then
+        if ! ctest $CHECK_MAKEOPTS --no-compress-output --output-on-failure --test-output-size-failed 1024000 -T Test; then
             # do not return failure, as the jenkins publisher will take care of this
             rm -fr ${TMPDIR:-/tmp}/ceph-asok.*
         fi
@@ -69,6 +69,7 @@ function main() {
         echo "Please fix 'hostname --fqdn', otherwise 'make check' will fail"
         return 1
     fi
+    # uses run-make.sh to install-deps
     FOR_MAKE_CHECK=1 prepare
     local cxx_compiler=g++
     local c_compiler=gcc
@@ -98,7 +99,7 @@ function main() {
     if [ $WITH_PMEM ]; then
         cmake_opts+=" -DWITH_RBD_RWL=ON -DWITH_SYSTEM_PMDK=ON"
     fi
-    configure $cmake_opts $@
+    configure "$cmake_opts" "$@"
     build tests
     echo "make check: successful build on $(git rev-parse HEAD)"
     run

@@ -454,7 +454,7 @@ int RGWGetObj_ObjStore_S3::get_decrypt_filter(std::unique_ptr<RGWGetObj_Filter> 
   res = rgw_s3_prepare_decrypt(s, attrs, &block_crypt, crypt_http_responses);
   if (res == 0) {
     if (block_crypt != nullptr) {
-      auto f = std::make_unique<RGWGetObj_BlockDecrypt>(s->cct, cb, std::move(block_crypt));
+      auto f = std::make_unique<RGWGetObj_BlockDecrypt>(s, s->cct, cb, std::move(block_crypt));
       if (manifest_bl != nullptr) {
         res = f->read_manifest(this, *manifest_bl);
         if (res == 0) {
@@ -2559,7 +2559,7 @@ int RGWPutObj_ObjStore_S3::get_decrypt_filter(
   res = rgw_s3_prepare_decrypt(s, attrs, &block_crypt, crypt_http_responses_unused);
   if (res == 0) {
     if (block_crypt != nullptr) {
-      auto f = std::unique_ptr<RGWGetObj_BlockDecrypt>(new RGWGetObj_BlockDecrypt(s->cct, cb, std::move(block_crypt)));
+      auto f = std::unique_ptr<RGWGetObj_BlockDecrypt>(new RGWGetObj_BlockDecrypt(s, s->cct, cb, std::move(block_crypt)));
       //RGWGetObj_BlockDecrypt* f = new RGWGetObj_BlockDecrypt(s->cct, cb, std::move(block_crypt));
       if (f != nullptr) {
         if (manifest_bl != nullptr) {
@@ -2592,7 +2592,7 @@ int RGWPutObj_ObjStore_S3::get_encrypt_filter(
        * We use crypto mode that configured as if we were decrypting. */
       res = rgw_s3_prepare_decrypt(s, obj->get_attrs(), &block_crypt, crypt_http_responses);
       if (res == 0 && block_crypt != nullptr)
-        filter->reset(new RGWPutObj_BlockEncrypt(s->cct, cb, std::move(block_crypt)));
+        filter->reset(new RGWPutObj_BlockEncrypt(s, s->cct, cb, std::move(block_crypt)));
     }
     /* it is ok, to not have encryption at all */
   }
@@ -2601,7 +2601,7 @@ int RGWPutObj_ObjStore_S3::get_encrypt_filter(
     std::unique_ptr<BlockCrypt> block_crypt;
     res = rgw_s3_prepare_encrypt(s, attrs, nullptr, &block_crypt, crypt_http_responses);
     if (res == 0 && block_crypt != nullptr) {
-      filter->reset(new RGWPutObj_BlockEncrypt(s->cct, cb, std::move(block_crypt)));
+      filter->reset(new RGWPutObj_BlockEncrypt(s, s->cct, cb, std::move(block_crypt)));
     }
   }
   return res;
@@ -3135,7 +3135,7 @@ int RGWPostObj_ObjStore_S3::get_encrypt_filter(
   int res = rgw_s3_prepare_encrypt(s, attrs, &parts, &block_crypt,
                                    crypt_http_responses);
   if (res == 0 && block_crypt != nullptr) {
-    filter->reset(new RGWPutObj_BlockEncrypt(s->cct, cb, std::move(block_crypt)));
+    filter->reset(new RGWPutObj_BlockEncrypt(s, s->cct, cb, std::move(block_crypt)));
   }
   return res;
 }
@@ -4024,26 +4024,7 @@ void RGWGetObjLayout_ObjStore_S3::send_response()
   }
 
   f.open_object_section("result");
-  ::encode_json("head", head_obj, &f);
-  ::encode_json("manifest", *manifest, &f);
-  f.open_array_section("data_location");
-  for (auto miter = manifest->obj_begin(this); miter != manifest->obj_end(this); ++miter) {
-    f.open_object_section("obj");
-    rgw_raw_obj raw_loc = miter.get_location().get_raw_obj(store);
-    uint64_t ofs = miter.get_ofs();
-    uint64_t left = manifest->get_obj_size() - ofs;
-    ::encode_json("ofs", miter.get_ofs(), &f);
-    ::encode_json("loc", raw_loc, &f);
-    ::encode_json("loc_ofs", miter.location_ofs(), &f);
-    uint64_t loc_size = miter.get_stripe_size();
-    if (loc_size > left) {
-      loc_size = left;
-    }
-    ::encode_json("loc_size", loc_size, &f);
-    f.close_section();
-    rgw_flush_formatter(s, &f);
-  }
-  f.close_section();
+  s->object->get_obj_layout(this, s->yield, &f, s->obj_ctx);
   f.close_section();
   rgw_flush_formatter(s, &f);
 }
@@ -6018,7 +5999,7 @@ rgw::auth::s3::STSEngine::get_session_token(const DoutPrefixProvider* dpp, const
     return -EINVAL;
   }
   string error;
-  auto* keyhandler = cryptohandler->get_key_handler(secret, error);
+  std::unique_ptr<CryptoKeyHandler> keyhandler(cryptohandler->get_key_handler(secret, error));
   if (! keyhandler) {
     return -EINVAL;
   }

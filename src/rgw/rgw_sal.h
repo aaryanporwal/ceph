@@ -43,6 +43,13 @@ namespace rgw {
   namespace IAM { struct Policy; }
 }
 
+class RGWGetDataCB {
+public:
+  virtual int handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len) = 0;
+  RGWGetDataCB() {}
+  virtual ~RGWGetDataCB() {}
+};
+
 struct RGWUsageIter {
   std::string read_iter;
   uint32_t index;
@@ -202,13 +209,8 @@ class Store {
     virtual std::unique_ptr<Completions> get_completions(void) = 0;
     virtual std::unique_ptr<Notification> get_notification(rgw::sal::Object* obj, struct req_state* s, 
         rgw::notify::EventType event_type, const std::string* object_name=nullptr) = 0;
-    virtual std::unique_ptr<GCChain> get_gc_chain(rgw::sal::Object* obj) = 0;
     virtual RGWLC* get_rgwlc(void) = 0;
     virtual RGWCoroutinesManagerRegistry* get_cr_registry() = 0;
-    virtual int delete_raw_obj(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj) = 0;
-    virtual int delete_raw_obj_aio(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj, Completions* aio) = 0;
-    virtual void get_raw_obj(const rgw_placement_rule& placement_rule, const rgw_obj& obj, rgw_raw_obj* raw_obj) = 0;
-    virtual int get_raw_chunk_size(const DoutPrefixProvider* dpp, const rgw_raw_obj& obj, uint64_t* chunk_size) = 0;
 
     virtual int log_usage(const DoutPrefixProvider *dpp, std::map<rgw_user_bucket, RGWUsageBatch>& usage_info) = 0;
     virtual int log_op(const DoutPrefixProvider *dpp, std::string& oid, bufferlist& bl) = 0;
@@ -590,56 +592,12 @@ class Object {
         rgw_obj* target_obj{nullptr}; // XXX dang remove?
       } params;
 
-      struct Result {
-        rgw_raw_obj head_obj;
-
-        Result() : head_obj() {}
-      } result;
-
       virtual ~ReadOp() = default;
 
       virtual int prepare(optional_yield y, const DoutPrefixProvider* dpp) = 0;
       virtual int read(int64_t ofs, int64_t end, bufferlist& bl, optional_yield y, const DoutPrefixProvider* dpp) = 0;
       virtual int iterate(const DoutPrefixProvider* dpp, int64_t ofs, int64_t end, RGWGetDataCB* cb, optional_yield y) = 0;
-      virtual int get_manifest(const DoutPrefixProvider* dpp, RGWObjManifest **pmanifest, optional_yield y) = 0;
       virtual int get_attr(const DoutPrefixProvider* dpp, const char* name, bufferlist& dest, optional_yield y) = 0;
-    };
-
-    struct WriteOp {
-      struct Params {
-	bool versioning_disabled{false};
-	ceph::real_time* mtime{nullptr};
-	Attrs* rmattrs{nullptr};
-	const bufferlist* data{nullptr};
-	RGWObjManifest* manifest{nullptr};
-	const std::string* ptag{nullptr};
-	std::list<rgw_obj_index_key>* remove_objs{nullptr};
-	ceph::real_time set_mtime;
-	ACLOwner owner;
-	RGWObjCategory category{RGWObjCategory::Main};
-	int flags{0};
-	const char* if_match{nullptr};
-	const char* if_nomatch{nullptr};
-	std::optional<uint64_t> olh_epoch;
-	ceph::real_time delete_at;
-	bool canceled{false};
-	const std::string* user_data{nullptr};
-	rgw_zone_set* zones_trace{nullptr};
-	bool modify_tail{false};
-	bool completeMultipart{false};
-	bool appendable{false};
-	Attrs* attrs{nullptr};
-	// In MultipartObjectProcessor::complete, we need this parameter
-	// to tell the exact placement rule since it may be different from
-	// bucket.placement_rule when Storage Class is specified explicitly
-	const rgw_placement_rule *pmeta_placement_rule{nullptr};
-      } params;
-
-      virtual ~WriteOp() = default;
-
-      virtual int prepare(optional_yield y) = 0;
-      virtual int write_meta(const DoutPrefixProvider* dpp, uint64_t size, uint64_t accounted_size, optional_yield y) = 0;
-      //virtual int write_data(const char* data, uint64_t ofs, uint64_t len, bool exclusive) = 0;
     };
 
     struct DeleteOp {
@@ -668,18 +626,6 @@ class Object {
       virtual ~DeleteOp() = default;
 
       virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y) = 0;
-    };
-
-    struct StatOp {
-      struct Result {
-	Object* obj;
-        RGWObjManifest* manifest;
-      } result;
-
-      virtual ~StatOp() = default;
-
-      virtual int stat_async(const DoutPrefixProvider *dpp) = 0;
-      virtual int wait(const DoutPrefixProvider *dpp) = 0;
     };
 
     Object()
@@ -744,7 +690,6 @@ class Object {
     virtual int copy_obj_data(RGWObjectCtx& rctx, Bucket* dest_bucket, Object* dest_obj, uint16_t olh_epoch, std::string* petag, const DoutPrefixProvider* dpp, optional_yield y) = 0;
     virtual bool is_expired() = 0;
     virtual void gen_rand_obj_instance_name() = 0;
-    virtual void raw_obj_to_obj(const rgw_raw_obj& raw_obj) = 0;
     virtual MPSerializer* get_serializer(const DoutPrefixProvider *dpp, const std::string& lock_name) = 0;
     virtual int transition(RGWObjectCtx& rctx,
 			   Bucket* bucket,
@@ -759,9 +704,11 @@ class Object {
 				   uint64_t* alignment = nullptr) = 0;
     virtual void get_max_aligned_size(uint64_t size, uint64_t alignment, uint64_t* max_size) = 0;
     virtual bool placement_rules_match(rgw_placement_rule& r1, rgw_placement_rule& r2) = 0;
+    virtual int get_obj_layout(const DoutPrefixProvider *dpp, optional_yield y, Formatter* f, RGWObjectCtx* obj_ctx) = 0;
 
     Attrs& get_attrs(void) { return attrs; }
     const Attrs& get_attrs(void) const { return attrs; }
+    virtual int set_attrs(Attrs a) { attrs = a; return 0; }
     ceph::real_time get_mtime(void) const { return mtime; }
     uint64_t get_obj_size(void) const { return obj_size; }
     Bucket* get_bucket(void) const { return bucket; }
@@ -793,9 +740,7 @@ class Object {
 
     /* OPs */
     virtual std::unique_ptr<ReadOp> get_read_op(RGWObjectCtx*) = 0;
-    virtual std::unique_ptr<WriteOp> get_write_op(RGWObjectCtx*) = 0;
     virtual std::unique_ptr<DeleteOp> get_delete_op(RGWObjectCtx*) = 0;
-    virtual std::unique_ptr<StatOp> get_stat_op(RGWObjectCtx*) = 0;
 
     /* OMAP */
     virtual int omap_get_vals(const DoutPrefixProvider *dpp, const std::string& marker, uint64_t count,
@@ -878,12 +823,16 @@ public:
 			 bool assume_unsorted = false) = 0;
   virtual int abort(const DoutPrefixProvider* dpp, CephContext* cct,
 		    RGWObjectCtx* obj_ctx) = 0;
-  virtual int complete(const DoutPrefixProvider* dpp, CephContext* cct,
-		       std::string& etag, RGWObjManifest& manifest,
+  virtual int complete(const DoutPrefixProvider* dpp,
+		       optional_yield y, CephContext* cct,
 		       std::map<int, std::string>& part_etags,
 		       std::list<rgw_obj_index_key>& remove_objs,
 		       uint64_t& accounted_size, bool& compressed,
-		       RGWCompressionInfo& cs_info, off_t& ofs) = 0;
+		       RGWCompressionInfo& cs_info, off_t& ofs,
+		       std::string& tag, ACLOwner& owner,
+		       uint64_t olh_epoch,
+		       rgw::sal::Object* target_obj,
+		       RGWObjectCtx* obj_ctx) = 0;
 
   virtual int get_info(const DoutPrefixProvider *dpp, optional_yield y, RGWObjectCtx* obj_ctx, rgw_placement_rule** rule, rgw::sal::Attrs* attrs = nullptr) = 0;
 
@@ -985,19 +934,6 @@ protected:
     virtual int publish_reserve(const DoutPrefixProvider *dpp, RGWObjTags* obj_tags = nullptr) = 0;
     virtual int publish_commit(const DoutPrefixProvider* dpp, uint64_t size,
 			       const ceph::real_time& mtime, const std::string& etag, const std::string& version) = 0;
-};
-
-class GCChain {
-protected:
-  Object* obj;
-
-  public:
-    GCChain(Object* _obj) : obj(_obj) {}
-    virtual ~GCChain() = default;
-
-    virtual void update(const DoutPrefixProvider *dpp, RGWObjManifest* manifest) = 0;
-    virtual int send(const std::string& tag) = 0;
-    virtual void delete_inline(const DoutPrefixProvider *dpp, const std::string& tag) = 0;
 };
 
 class Writer : public ObjectProcessor {
