@@ -317,8 +317,7 @@ extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_conf_parse_argv)(
   }
   librados::RadosClient *client = (librados::RadosClient *)cluster;
   auto& conf = client->cct->_conf;
-  vector<const char*> args;
-  argv_to_vec(argc, argv, args);
+  auto args = argv_to_vec(argc, argv);
   int ret = conf.parse_argv(args);
   if (ret) {
     tracepoint(librados, rados_conf_parse_argv_exit, ret);
@@ -456,7 +455,7 @@ extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_pool_reverse_lookup)(
   tracepoint(librados, rados_pool_reverse_lookup_enter, cluster, id, maxlen);
   librados::RadosClient *radosp = (librados::RadosClient *)cluster;
   std::string name;
-  int r = radosp->pool_get_name(id, &name);
+  int r = radosp->pool_get_name(id, &name, true);
   if (r < 0) {
     tracepoint(librados, rados_pool_reverse_lookup_exit, r, "");
     return r;
@@ -1608,7 +1607,7 @@ LIBRADOS_C_API_BASE_DEFAULT(rados_ioctx_pool_requires_alignment);
 
 extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_ioctx_pool_requires_alignment2)(
   rados_ioctx_t io,
-  int *requires)
+  int *req)
 {
   tracepoint(librados, rados_ioctx_pool_requires_alignment_enter2, io);
   librados::IoCtxImpl *ctx = (librados::IoCtxImpl *)io;
@@ -1617,8 +1616,8 @@ extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_ioctx_pool_requires_alignment2)(
   	&requires_alignment);
   tracepoint(librados, rados_ioctx_pool_requires_alignment_exit2, retval, 
   	requires_alignment);
-  if (requires)
-    *requires = requires_alignment;
+  if (req)
+    *req = requires_alignment;
   return retval;
 }
 LIBRADOS_C_API_BASE_DEFAULT(rados_ioctx_pool_requires_alignment2);

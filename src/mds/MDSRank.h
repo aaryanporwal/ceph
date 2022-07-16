@@ -22,7 +22,9 @@
 #include "common/DecayCounter.h"
 #include "common/LogClient.h"
 #include "common/Timer.h"
+#include "common/fair_mutex.h"
 #include "common/TrackedOp.h"
+#include "common/ceph_mutex.h"
 
 #include "include/common_fwd.h"
 
@@ -51,8 +53,10 @@ enum {
   l_mds_request,
   l_mds_reply,
   l_mds_reply_latency,
+  l_mds_slow_reply,
   l_mds_forward,
-  l_mds_dir_fetch,
+  l_mds_dir_fetch_complete,
+  l_mds_dir_fetch_keys,
   l_mds_dir_commit,
   l_mds_dir_split,
   l_mds_dir_merge,
@@ -164,9 +168,9 @@ class MDSRank {
 
     MDSRank(
         mds_rank_t whoami_,
-        ceph::mutex &mds_lock_,
+        ceph::fair_mutex &mds_lock_,
         LogChannelRef &clog_,
-        SafeTimer &timer_,
+        CommonSafeTimer<ceph::fair_mutex> &timer_,
         Beacon &beacon_,
         std::unique_ptr<MDSMap> & mdsmap_,
         Messenger *msgr,
@@ -264,6 +268,9 @@ class MDSRank {
      * of code while holding the mds_lock
      */
     void heartbeat_reset();
+    int heartbeat_reset_grace(int count=1) {
+      return count * _heartbeat_reset_grace;
+    }
 
     /**
      * Report state DAMAGED to the mon, and then pass on to respawn().  Call
@@ -299,6 +306,9 @@ class MDSRank {
     void send_message_client(const ref_t<Message>& m, Session* session);
     void send_message(const ref_t<Message>& m, const ConnectionRef& c);
 
+    void wait_for_bootstrapped_peer(mds_rank_t who, MDSContext *c) {
+      waiting_for_bootstrapping_peer[who].push_back(c);
+    }
     void wait_for_active_peer(mds_rank_t who, MDSContext *c) { 
       waiting_for_active_peer[who].push_back(c);
     }
@@ -367,7 +377,7 @@ class MDSRank {
     // Reference to global MDS::mds_lock, so that users of MDSRank don't
     // carry around references to the outer MDS, and we can substitute
     // a separate lock here in future potentially.
-    ceph::mutex &mds_lock;
+    ceph::fair_mutex &mds_lock;
 
     // Reference to global cluster log client, just to avoid initialising
     // a separate one here.
@@ -376,7 +386,7 @@ class MDSRank {
     // Reference to global timer utility, because MDSRank and MDSDaemon
     // currently both use the same mds_lock, so it makes sense for them
     // to share a timer.
-    SafeTimer &timer;
+    CommonSafeTimer<ceph::fair_mutex> &timer;
 
     std::unique_ptr<MDSMap> &mdsmap; /* MDSDaemon::mdsmap */
 
@@ -429,7 +439,7 @@ class MDSRank {
       void signal() {cond.notify_all();}
       private:
       MDSRank *mds;
-      ceph::condition_variable cond;
+      std::condition_variable_any cond;
     } progress_thread;
 
     class C_MDS_StandbyReplayRestart;
@@ -544,6 +554,10 @@ class MDSRank {
 
     Context *create_async_exec_context(C_ExecAndReply *ctx);
 
+    // blocklist the provided addrs and set OSD epoch barrier
+    // with the provided epoch.
+    void apply_blocklist(const std::set<entity_addr_t> &addrs, epoch_t epoch);
+
     // Incarnation as seen in MDSMap at the point where a rank is
     // assigned.
     int incarnation = 0;
@@ -566,6 +580,7 @@ class MDSRank {
 
     ceph::heartbeat_handle_d *hb = nullptr;  // Heartbeat for threads using mds_lock
     double heartbeat_grace;
+    int _heartbeat_reset_grace;
 
     std::map<mds_rank_t, version_t> peer_mdsmap_epoch;
 
@@ -577,8 +592,9 @@ class MDSRank {
     MDSContext::que replay_queue;
     bool replaying_requests_done = false;
 
-    std::map<mds_rank_t, MDSContext::vec > waiting_for_active_peer;
-    std::map<epoch_t, MDSContext::vec > waiting_for_mdsmap;
+    std::map<mds_rank_t, MDSContext::vec> waiting_for_active_peer;
+    std::map<mds_rank_t, MDSContext::vec> waiting_for_bootstrapping_peer;
+    std::map<epoch_t, MDSContext::vec> waiting_for_mdsmap;
 
     epoch_t osd_epoch_barrier = 0;
 
@@ -657,9 +673,9 @@ class MDSRankDispatcher : public MDSRank, public md_config_obs_t
 public:
   MDSRankDispatcher(
       mds_rank_t whoami_,
-      ceph::mutex &mds_lock_,
+      ceph::fair_mutex &mds_lock_,
       LogChannelRef &clog_,
-      SafeTimer &timer_,
+      CommonSafeTimer<ceph::fair_mutex> &timer_,
       Beacon &beacon_,
       std::unique_ptr<MDSMap> &mdsmap_,
       Messenger *msgr,
@@ -694,4 +710,3 @@ public:
 };
 
 #endif // MDS_RANK_H_
-

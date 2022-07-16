@@ -81,9 +81,9 @@ seastar::future<> Watch::connect(crimson::net::ConnectionRef conn, bool)
 {
   if (this->conn == conn) {
     logger().debug("conn={} already connected", conn);
-    timeout_timer.cancel();
+    return seastar::now();
   }
-
+  timeout_timer.cancel();
   timeout_timer.arm(std::chrono::seconds{winfo.timeout_seconds});
   this->conn = std::move(conn);
   return seastar::now();
@@ -116,7 +116,7 @@ seastar::future<> Watch::notify_ack(
 {
   logger().info("{}", __func__);
   return seastar::do_for_each(in_progress_notifies,
-    [this_shared=shared_from_this(), &reply_bl] (auto notify) {
+    [this_shared=shared_from_this(), reply_bl] (auto notify) {
       return notify->complete_watcher(this_shared, reply_bl);
     }
   ).then([this] {

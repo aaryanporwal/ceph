@@ -108,6 +108,7 @@ public:
   }
 
   seastar::future<> stop() {
+    crimson::get_logger(ceph_subsys_osd).info("ShardServices::{}", __func__);
     stopping = true;
     return registry.stop();
   }
@@ -137,6 +138,13 @@ public:
   seastar::future<> dispatch_context(
     PeeringCtx &&ctx) {
     return dispatch_context({}, std::move(ctx));
+  }
+
+  // -- tids --
+  // for ops i issue
+  unsigned int next_tid{0};
+  ceph_tid_t get_tid() {
+    return (ceph_tid_t)next_tid++;
   }
 
   // PG Temp State

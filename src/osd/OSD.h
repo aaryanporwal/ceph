@@ -53,6 +53,7 @@
 #include "common/EventTrace.h"
 #include "osd/osd_perf_counters.h"
 #include "common/Finisher.h"
+#include "scrubber/osd_scrub_sched.h"
 
 #define CEPH_OSD_PROTOCOL    10 /* cluster internal */
 
@@ -93,7 +94,7 @@ class MMonGetPurgedSnapsReply;
 
 class OSD;
 
-class OSDService {
+class OSDService : public Scrub::ScrubSchedListener {
   using OpSchedulerItem = ceph::osd::scheduler::OpSchedulerItem;
 public:
   OSD *osd;
@@ -129,7 +130,7 @@ public:
     }
   }
 
-  ceph::signedspan get_mnow();
+  ceph::signedspan get_mnow() const;
 
 private:
   // -- superblock --
@@ -146,7 +147,7 @@ public:
     superblock = block;
   }
 
-  int get_nodeid() const { return whoami; }
+  int get_nodeid() const final { return whoami; }
 
   std::atomic<epoch_t> max_oldest_map;
 private:
@@ -260,87 +261,41 @@ public:
   }
   entity_name_t get_cluster_msgr_name() const;
 
-private:
-  // -- scrub scheduling --
-  ceph::mutex sched_scrub_lock = ceph::make_mutex("OSDService::sched_scrub_lock");
-  int scrubs_local;
-  int scrubs_remote;
 
 public:
-  struct ScrubJob {
-    CephContext* cct;
-    /// pg to be scrubbed
-    spg_t pgid;
-    /// a time scheduled for scrub. but the scrub could be delayed if system
-    /// load is too high or it fails to fall in the scrub hours
-    utime_t sched_time;
-    /// the hard upper bound of scrub time
-    utime_t deadline;
-    ScrubJob() : cct(nullptr) {}
-    explicit ScrubJob(CephContext* cct, const spg_t& pg,
-		      const utime_t& timestamp,
-		      double pool_scrub_min_interval = 0,
-		      double pool_scrub_max_interval = 0, bool must = true);
-    /// order the jobs by sched_time
-    bool operator<(const ScrubJob& rhs) const;
-  };
-  std::set<ScrubJob> sched_scrub_pg;
-
-  /// @returns the scrub_reg_stamp used for unregistering the scrub job
-  utime_t reg_pg_scrub(spg_t pgid,
-		       utime_t t,
-		       double pool_scrub_min_interval,
-		       double pool_scrub_max_interval,
-		       bool must) {
-    ScrubJob scrub_job(cct, pgid, t, pool_scrub_min_interval, pool_scrub_max_interval,
-		       must);
-    std::lock_guard l(OSDService::sched_scrub_lock);
-    sched_scrub_pg.insert(scrub_job);
-    return scrub_job.sched_time;
-  }
-
-  void unreg_pg_scrub(spg_t pgid, utime_t t) {
-    std::lock_guard l(sched_scrub_lock);
-    size_t removed = sched_scrub_pg.erase(ScrubJob(cct, pgid, t));
-    ceph_assert(removed);
-  }
-
-  bool first_scrub_stamp(ScrubJob *out) {
-    std::lock_guard l(sched_scrub_lock);
-    if (sched_scrub_pg.empty())
-      return false;
-    std::set<ScrubJob>::iterator iter = sched_scrub_pg.begin();
-    *out = *iter;
-    return true;
-  }
-  bool next_scrub_stamp(const ScrubJob& next,
-			ScrubJob *out) {
-    std::lock_guard l(sched_scrub_lock);
-    if (sched_scrub_pg.empty())
-      return false;
-    std::set<ScrubJob>::const_iterator iter = sched_scrub_pg.upper_bound(next);
-    if (iter == sched_scrub_pg.cend())
-      return false;
-    *out = *iter;
-    return true;
-  }
-
-  void dumps_scrub(ceph::Formatter* f);
-
-  bool can_inc_scrubs();
-  bool inc_scrubs_local();
-  void dec_scrubs_local();
-  bool inc_scrubs_remote();
-  void dec_scrubs_remote();
-  void dump_scrub_reservations(ceph::Formatter *f);
 
   void reply_op_error(OpRequestRef op, int err);
   void reply_op_error(OpRequestRef op, int err, eversion_t v, version_t uv,
 		      std::vector<pg_log_op_return_item_t> op_returns);
   void handle_misdirected_op(PG *pg, OpRequestRef op);
 
+ private:
+  /**
+   * The entity that maintains the set of PGs we may scrub (i.e. - those that we
+   * are their primary), and schedules their scrubbing.
+   */
+  ScrubQueue m_scrub_queue;
 
-private:
+ public:
+  ScrubQueue& get_scrub_services() { return m_scrub_queue; }
+
+  /**
+   * A callback used by the ScrubQueue object to initiate a scrub on a specific PG.
+   *
+   * The request might fail for multiple reasons, as ScrubQueue cannot by its own
+   * check some of the PG-specific preconditions and those are checked here. See
+   * attempt_t definition.
+   *
+   * @param pgid to scrub
+   * @param allow_requested_repair_only
+   * @return a Scrub::attempt_t detailing either a success, or the failure reason.
+   */
+  Scrub::schedule_result_t initiate_a_scrub(
+    spg_t pgid,
+    bool allow_requested_repair_only) final;
+
+
+ private:
   // -- agent shared state --
   ceph::mutex agent_lock = ceph::make_mutex("OSDService::agent_lock");
   ceph::condition_variable agent_cond;
@@ -638,16 +593,19 @@ public:
 
   void queue_for_rep_scrub(PG* pg,
 			   Scrub::scrub_prio_t with_high_priority,
-			   unsigned int qu_priority);
+			   unsigned int qu_priority,
+			   Scrub::act_token_t act_token);
 
   /// Signals a change in the number of in-flight recovery writes
   void queue_scrub_replica_pushes(PG *pg, Scrub::scrub_prio_t with_priority);
 
-  /// (not in Crimson) Queue a SchedReplica event to be sent to the replica, to trigger
-  /// a re-check of the availability of the scrub map prepared by the backend.
+  /// (not in Crimson) Queue a SchedReplica event to be sent to the replica, to
+  /// trigger a re-check of the availability of the scrub map prepared by the
+  /// backend.
   void queue_for_rep_scrub_resched(PG* pg,
 				   Scrub::scrub_prio_t with_high_priority,
-				   unsigned int qu_priority);
+				   unsigned int qu_priority,
+				   Scrub::act_token_t act_token);
 
   void queue_for_pg_delete(spg_t pgid, epoch_t e);
   bool try_finish_pg_delete(PG *pg, unsigned old_pg_num);
@@ -661,7 +619,8 @@ private:
   template <class MSG_TYPE>
   void queue_scrub_event_msg(PG* pg,
 			     Scrub::scrub_prio_t with_priority,
-			     unsigned int qu_priority);
+			     unsigned int qu_priority,
+			     Scrub::act_token_t act_token);
 
   /// An alternative version of queue_scrub_event_msg(), in which the queuing priority is
   /// provided by the executing scrub (i.e. taken from PgScrubber::m_flags)
@@ -1090,7 +1049,7 @@ struct OSDShard {
     const OSDMapRef& osdmap,
     unsigned *pushes_to_free);
 
-  void _wake_pg_slot(spg_t pgid, OSDShardPGSlot *slot);
+  int _wake_pg_slot(spg_t pgid, OSDShardPGSlot *slot);
 
   void identify_splits_and_merges(
     const OSDMapRef& as_of_osdmap,
@@ -1104,6 +1063,7 @@ struct OSDShard {
   void register_and_wake_split_child(PG *pg);
   void unprime_split_children(spg_t parent, unsigned old_pg_num);
   void update_scheduler_config();
+  std::string get_scheduler_type();
 
   OSDShard(
     int id,
@@ -1170,7 +1130,6 @@ protected:
   void tick();
   void tick_without_osd_lock();
   void _dispatch(Message *m);
-  void dispatch_op(OpRequestRef op);
 
   void check_osdmap_features();
 
@@ -1585,15 +1544,6 @@ public:
   } heartbeat_dispatcher;
 
 private:
-  // -- waiters --
-  std::list<OpRequestRef> finished;
-
-  void take_waiters(std::list<OpRequestRef>& ls) {
-    ceph_assert(ceph_mutex_is_locked(osd_lock));
-    finished.splice(finished.end(), ls);
-  }
-  void do_waiters();
-
   // -- op tracking --
   OpTracker op_tracker;
   void test_ops(std::string command, std::string args, std::ostream& ss);
@@ -1634,7 +1584,7 @@ protected:
     : public ShardedThreadPool::ShardedWQ<OpSchedulerItem>
   {
     OSD *osd;
-
+    bool m_fast_shutdown = false;
   public:
     ShardedOpWQ(OSD *o,
 		ceph::timespan ti,
@@ -1651,6 +1601,8 @@ protected:
 
     /// try to do some work
     void _process(uint32_t thread_index, ceph::heartbeat_handle_d *hb) override;
+
+    void stop_for_fast_shutdown();
 
     /// enqueue a new item
     void _enqueue(OpSchedulerItem&& item) override;
@@ -1758,12 +1710,10 @@ protected:
   pool_pg_num_history_t pg_num_history;
 
   ceph::shared_mutex map_lock = ceph::make_shared_mutex("OSD::map_lock");
-  std::list<OpRequestRef>  waiting_for_osdmap;
   std::deque<utime_t> osd_markdown_log;
 
   friend struct send_map_on_destruct;
 
-  void wait_for_new_map(OpRequestRef op);
   void handle_osd_map(class MOSDMap *m);
   void _committed_osd_maps(epoch_t first, epoch_t last, class MOSDMap *m);
   void trim_maps(epoch_t oldest, int nreceived, bool skip_maps);
@@ -1845,17 +1795,7 @@ protected:
 
   void load_pgs();
 
-  /// build initial pg history and intervals on create
-  void build_initial_pg_history(
-    spg_t pgid,
-    epoch_t created,
-    utime_t created_stamp,
-    pg_history_t *h,
-    PastIntervals *pi);
-
   epoch_t last_pg_create_epoch;
-
-  void handle_pg_create(OpRequestRef op);
 
   void split_pgs(
     PG *parent,
@@ -1925,8 +1865,6 @@ protected:
     return service.get_tid();
   }
 
-  double scrub_sleep_time(bool must_scrub);
-
   // -- generic pg peering --
   void dispatch_context(PeeringCtx &ctx, PG *pg, OSDMapRef curmap,
                         ThreadPool::TPHandle *handle = NULL);
@@ -1934,21 +1872,6 @@ protected:
   bool require_mon_peer(const Message *m);
   bool require_mon_or_mgr_peer(const Message *m);
   bool require_osd_peer(const Message *m);
-  /***
-   * Verifies that we were alive in the given epoch, and that
-   * still are.
-   */
-  bool require_self_aliveness(const Message *m, epoch_t alive_since);
-  /**
-   * Verifies that the OSD who sent the given op has the same
-   * address as in the given std::map.
-   * @pre op was sent by an OSD using the cluster messenger
-   */
-  bool require_same_peer_instance(const Message *m, const OSDMapRef& map,
-				  bool is_fast_dispatch);
-
-  bool require_same_or_newer_map(OpRequestRef& op, epoch_t e,
-				 bool is_fast_dispatch);
 
   void handle_fast_pg_create(MOSDPGCreate2 *m);
   void handle_pg_query_nopg(const MQuery& q);
@@ -1977,8 +1900,6 @@ protected:
   void sched_scrub();
   void resched_all_scrubs();
   bool scrub_random_backoff();
-  bool scrub_load_below_threshold();
-  bool scrub_time_permit(utime_t now);
 
   // -- status reporting --
   MPGStats *collect_pg_stats();
@@ -2087,7 +2008,6 @@ private:
 			ObjectStore *store,
 			uuid_d& cluster_fsid, uuid_d& osd_fsid, int whoami, std::string& osdspec_affinity);
 
-  void handle_scrub(class MOSDScrub *m);
   void handle_fast_scrub(class MOSDScrub2 *m);
   void handle_osd_ping(class MOSDPing *m);
 
@@ -2109,6 +2029,7 @@ private:
                          double *elapsed,
                          std::ostream& ss);
   int mon_cmd_set_config(const std::string &key, const std::string &val);
+  bool unsupported_objstore_for_qos();
 
   void scrub_purged_snaps();
   void probe_smart(const std::string& devid, std::ostream& ss);

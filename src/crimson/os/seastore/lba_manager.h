@@ -19,7 +19,6 @@
 
 #include "crimson/os/seastore/cache.h"
 #include "crimson/os/seastore/seastore_types.h"
-#include "crimson/os/seastore/segment_manager.h"
 
 namespace crimson::os::seastore {
 
@@ -69,18 +68,6 @@ public:
     laddr_t offset) = 0;
 
   /**
-   * Finds unmapped laddr extent of len len
-   */
-  using find_hole_iertr = base_iertr;
-  using find_hole_ret = find_hole_iertr::future<
-    std::pair<laddr_t, extent_len_t>
-    >;
-  virtual find_hole_ret find_hole(
-    Transaction &t,
-    laddr_t hint,
-    extent_len_t) = 0;
-
-  /**
    * Allocates a new mapping referenced by LBARef
    *
    * Offset will be relative to the block offset of the record
@@ -94,18 +81,6 @@ public:
     laddr_t hint,
     extent_len_t len,
     paddr_t addr) = 0;
-
-  /**
-   * Creates a new absolute mapping.
-   *
-   * off~len must be unreferenced
-   */
-  using set_extent_iertr = base_iertr::extend<
-    crimson::ct_error::invarg>;
-  using set_extent_ret = set_extent_iertr::future<LBAPinRef>;
-  virtual set_extent_ret set_extent(
-    Transaction &t,
-    laddr_t off, extent_len_t len, paddr_t addr) = 0;
 
   struct ref_update_result_t {
     unsigned refcount = 0;
@@ -135,16 +110,23 @@ public:
     laddr_t addr) = 0;
 
   virtual void complete_transaction(
-    Transaction &t) = 0;
+    Transaction &t,
+    std::vector<CachedExtentRef> &to_clear,	///< extents whose pins are to be cleared,
+						//   as the results of their retirements
+    std::vector<CachedExtentRef> &to_link	///< fresh extents whose pins are to be inserted
+						//   into backref manager's pin set
+  ) = 0;
 
   /**
    * Should be called after replay on each cached extent.
    * Implementation must initialize the LBAPin on any
    * LogicalCachedExtent's and may also read in any dependent
    * structures, etc.
+   *
+   * @return returns whether the extent is alive
    */
   using init_cached_extent_iertr = base_iertr;
-  using init_cached_extent_ret = init_cached_extent_iertr::future<>;
+  using init_cached_extent_ret = init_cached_extent_iertr::future<bool>;
   virtual init_cached_extent_ret init_cached_extent(
     Transaction &t,
     CachedExtentRef e) = 0;
@@ -163,18 +145,6 @@ public:
     scan_mappings_func_t &&f) = 0;
 
   /**
-   * Calls f for each mapped space usage in [begin, end)
-   */
-  using scan_mapped_space_iertr = base_iertr::extend_ertr<
-    SegmentManager::read_ertr>;
-  using scan_mapped_space_ret = scan_mapped_space_iertr::future<>;
-  using scan_mapped_space_func_t = std::function<
-    void(paddr_t, extent_len_t)>;
-  virtual scan_mapped_space_ret scan_mapped_space(
-    Transaction &t,
-    scan_mapped_space_func_t &&f) = 0;
-
-  /**
    * rewrite_extent
    *
    * rewrite extent into passed transaction
@@ -184,6 +154,31 @@ public:
   virtual rewrite_extent_ret rewrite_extent(
     Transaction &t,
     CachedExtentRef extent) = 0;
+
+  /**
+   * update_mapping
+   *
+   * update lba mapping for a delayed allocated extent
+   */
+  using update_mapping_iertr = base_iertr;
+  using update_mapping_ret = base_iertr::future<>;
+  virtual update_mapping_ret update_mapping(
+    Transaction& t,
+    laddr_t laddr,
+    paddr_t prev_addr,
+    paddr_t paddr) = 0;
+
+  /**
+   * update_mappings
+   *
+   * update lba mappings for delayed allocated extents
+   */
+  using update_mappings_iertr = update_mapping_iertr;
+  using update_mappings_ret = update_mapping_ret;
+  update_mappings_ret update_mappings(
+    Transaction& t,
+    const std::list<LogicalCachedExtentRef>& extents,
+    const std::vector<paddr_t>& original_paddrs);
 
   /**
    * get_physical_extent_if_live
@@ -202,7 +197,7 @@ public:
     extent_types_t type,
     paddr_t addr,
     laddr_t laddr,
-    segment_off_t len) = 0;
+    seastore_off_t len) = 0;
 
   virtual void add_pin(LBAPin &pin) = 0;
 
@@ -212,9 +207,7 @@ using LBAManagerRef = std::unique_ptr<LBAManager>;
 
 class Cache;
 namespace lba_manager {
-LBAManagerRef create_lba_manager(
-  SegmentManager &segment_manager,
-  Cache &cache);
+LBAManagerRef create_lba_manager(Cache &cache);
 }
 
 }

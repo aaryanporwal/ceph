@@ -176,8 +176,10 @@ class RoundTripTestBase : public ::testing::TestWithParam<
                               std::tuple<round_trip_instance_t, mode_t>> {
 protected:
   RoundTripTestBase()
-      : m_tx_frame_asm(&m_tx_crypto, std::get<1>(GetParam()).is_rev1, &m_tx_comp),
-        m_rx_frame_asm(&m_rx_crypto, std::get<1>(GetParam()).is_rev1, &m_rx_comp),
+      : m_tx_frame_asm(&m_tx_crypto, std::get<1>(GetParam()).is_rev1, true,
+                                                 &m_tx_comp),
+        m_rx_frame_asm(&m_rx_crypto, std::get<1>(GetParam()).is_rev1, true,
+                                                 &m_rx_comp),
         m_header(make_bufferlist(std::get<0>(GetParam()).header_len, 'H')),
         m_front(make_bufferlist(std::get<0>(GetParam()).front_len, 'F')),
         m_middle(make_bufferlist(std::get<0>(GetParam()).middle_len, 'M')),
@@ -469,10 +471,9 @@ INSTANTIATE_TEST_SUITE_P(
 }  // namespace ceph::msgr::v2
 
 int main(int argc, char* argv[]) {
-  vector<const char*> args;
-  argv_to_vec(argc, (const char**)argv, args);
+  auto args = argv_to_vec(argc, argv);
 
-  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+  auto cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_CLIENT,
                          CODE_ENVIRONMENT_UTILITY,
                          CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);

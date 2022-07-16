@@ -31,7 +31,7 @@ int RGWHTTPSimpleRequest::handle_header(const string& name, const string& val)
     string err;
     long len = strict_strtol(val.c_str(), 10, &err);
     if (!err.empty()) {
-      ldout(cct, 0) << "ERROR: failed converting content length (" << val << ") to int " << dendl;
+      ldpp_dout(this, 0) << "ERROR: failed converting content length (" << val << ") to int " << dendl;
       return -EINVAL;
     }
 
@@ -49,7 +49,7 @@ int RGWHTTPSimpleRequest::receive_header(void *ptr, size_t len)
 
   char *s = (char *)ptr, *end = (char *)ptr + len;
   char *p = line;
-  ldout(cct, 10) << "receive_http_header" << dendl;
+  ldpp_dout(this, 30) << "receive_http_header" << dendl;
 
   while (s != end) {
     if (*s == '\r') {
@@ -58,7 +58,7 @@ int RGWHTTPSimpleRequest::receive_header(void *ptr, size_t len)
     }
     if (*s == '\n') {
       *p = '\0';
-      ldout(cct, 10) << "received header:" << line << dendl;
+      ldpp_dout(this, 30) << "received header:" << line << dendl;
       // TODO: fill whatever data required here
       char *l = line;
       char *tok = strsep(&l, " \t:");
@@ -189,7 +189,7 @@ void RGWHTTPSimpleRequest::get_out_headers(map<string, string> *pheaders)
   out_headers.clear();
 }
 
-static int sign_request_v2(const DoutPrefixProvider *dpp, RGWAccessKey& key,
+static int sign_request_v2(const DoutPrefixProvider *dpp, const RGWAccessKey& key,
                         const string& region, const string& service,
                         RGWEnv& env, req_info& info,
                         const bufferlist *opt_content)
@@ -230,7 +230,7 @@ static int sign_request_v2(const DoutPrefixProvider *dpp, RGWAccessKey& key,
   return 0;
 }
 
-static int sign_request_v4(const DoutPrefixProvider *dpp, RGWAccessKey& key,
+static int sign_request_v4(const DoutPrefixProvider *dpp, const RGWAccessKey& key,
                            const string& region, const string& service,
                            RGWEnv& env, req_info& info,
                            const bufferlist *opt_content)
@@ -248,7 +248,12 @@ static int sign_request_v4(const DoutPrefixProvider *dpp, RGWAccessKey& key,
     }
   }
 
-  auto sigv4_data = rgw::auth::s3::AWSSignerV4::prepare(dpp, key.id, region, service, info, opt_content, true);
+  rgw::auth::s3::AWSSignerV4::prepare_result_t sigv4_data;
+  if (service == "s3") {
+    sigv4_data = rgw::auth::s3::AWSSignerV4::prepare(dpp, key.id, region, service, info, opt_content, true);
+  } else {
+    sigv4_data = rgw::auth::s3::AWSSignerV4::prepare(dpp, key.id, region, service, info, opt_content, false);
+  }
   auto sigv4_headers = sigv4_data.signature_factory(dpp, key.key, sigv4_data);
 
   for (auto& entry : sigv4_headers) {
@@ -259,7 +264,7 @@ static int sign_request_v4(const DoutPrefixProvider *dpp, RGWAccessKey& key,
   return 0;
 }
 
-static int sign_request(const DoutPrefixProvider *dpp, RGWAccessKey& key,
+static int sign_request(const DoutPrefixProvider *dpp, const RGWAccessKey& key,
                         const string& region, const string& service,
                         RGWEnv& env, req_info& info,
                         const bufferlist *opt_content)
@@ -285,13 +290,14 @@ static string extract_region_name(string&& s)
 }
 
 
-static bool identify_scope(CephContext *cct,
+static bool identify_scope(const DoutPrefixProvider *dpp,
+                           CephContext *cct,
                            const string& host,
                            string *region,
-                           string *service)
+                           string& service)
 {
   if (!boost::algorithm::ends_with(host, "amazonaws.com")) {
-    ldout(cct, 20) << "NOTICE: cannot identify region for connection to: " << host << dendl;
+    ldpp_dout(dpp, 20) << "NOTICE: cannot identify region for connection to: " << host << dendl;
     return false;
   }
 
@@ -299,18 +305,22 @@ static bool identify_scope(CephContext *cct,
 
   get_str_vec(host, ".", vec);
 
-  *service = "s3"; /* default */
+  string ser = service;
+  if (service.empty()) {
+    service = "s3"; /* default */
+  }
 
   for (auto iter = vec.begin(); iter != vec.end(); ++iter) {
     auto& s = *iter;
     if (s == "s3" ||
-        s == "execute-api") {
+        s == "execute-api" ||
+        s == "iam") {
       if (s == "execute-api") {
-        *service = s;
+        service = s;
       }
       ++iter;
       if (iter == vec.end()) {
-        ldout(cct, 0) << "WARNING: cannot identify region name from host name: " << host << dendl;
+        ldpp_dout(dpp, 0) << "WARNING: cannot identify region name from host name: " << host << dendl;
         return false;
       }
       auto& next = *iter;
@@ -329,26 +339,31 @@ static bool identify_scope(CephContext *cct,
   return false;
 }
 
-static void scope_from_api_name(CephContext *cct,
+static void scope_from_api_name(const DoutPrefixProvider *dpp,
+                                CephContext *cct,
                                 const string& host,
                                 std::optional<string> api_name,
                                 string *region,
-                                string *service)
+                                string& service)
 {
-  if (api_name) {
+  if (api_name && service.empty()) {
     *region = *api_name;
-    *service = "s3";
+    service = "s3";
     return;
   }
 
-  if (!identify_scope(cct, host, region, service)) {
-    *region = cct->_conf->rgw_zonegroup;
-    *service = "s3";
+  if (!identify_scope(dpp, cct, host, region, service)) {
+    if (service == "iam") {
+      *region = cct->_conf->rgw_zonegroup;
+    } else {
+      *region = cct->_conf->rgw_zonegroup;
+      service = "s3";
+    }
     return;
   }
 }
 
-int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, RGWAccessKey& key, req_info& info, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y)
+int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, const RGWAccessKey& key, req_info& info, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y, std::string service)
 {
 
   string date_str;
@@ -379,19 +394,26 @@ int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, RGWAcce
   }
 
   string region;
-  string service;
+  string s;
+  if (!service.empty()) {
+    s = service;
+  }
 
-  scope_from_api_name(cct, host, api_name, &region, &service);
+  scope_from_api_name(dpp, cct, host, api_name, &region, s);
 
   const char *maybe_payload_hash = info.env->get("HTTP_X_AMZ_CONTENT_SHA256");
-  if (maybe_payload_hash) {
+  if (maybe_payload_hash && s != "iam") {
     new_env.set("HTTP_X_AMZ_CONTENT_SHA256", maybe_payload_hash);
   }
 
-  int ret = sign_request(dpp, key, region, service, new_env, new_info, nullptr);
+  int ret = sign_request(dpp, key, region, s, new_env, new_info, nullptr);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: failed to sign request" << dendl;
     return ret;
+  }
+
+  if (s == "iam") {
+    info.args.remove("PayloadHash");
   }
 
   for (const auto& kv: new_env.get_map()) {
@@ -557,7 +579,7 @@ void RGWRESTGenerateHTTPHeaders::init(const string& _method, const string& host,
                                       const string& resource, const param_vec_t& params,
                                       std::optional<string> api_name)
 {
-  scope_from_api_name(cct, host, api_name, &region, &service);
+  scope_from_api_name(this, cct, host, api_name, &region, service);
 
   string params_str;
   map<string, string>& args = new_info->args.get_params();
@@ -746,7 +768,7 @@ void set_str_from_headers(map<string, string>& out_headers, const string& header
   }
 }
 
-static int parse_rgwx_mtime(CephContext *cct, const string& s, ceph::real_time *rt)
+static int parse_rgwx_mtime(const DoutPrefixProvider *dpp, CephContext *cct, const string& s, ceph::real_time *rt)
 {
   string err;
   vector<string> vec;
@@ -760,14 +782,14 @@ static int parse_rgwx_mtime(CephContext *cct, const string& s, ceph::real_time *
   long secs = strict_strtol(vec[0].c_str(), 10, &err);
   long nsecs = 0;
   if (!err.empty()) {
-    ldout(cct, 0) << "ERROR: failed converting mtime (" << s << ") to real_time " << dendl;
+    ldpp_dout(dpp, 0) << "ERROR: failed converting mtime (" << s << ") to real_time " << dendl;
     return -EINVAL;
   }
 
   if (vec.size() > 1) {
     nsecs = strict_strtol(vec[1].c_str(), 10, &err);
     if (!err.empty()) {
-      ldout(cct, 0) << "ERROR: failed converting mtime (" << s << ") to real_time " << dendl;
+      ldpp_dout(dpp, 0) << "ERROR: failed converting mtime (" << s << ") to real_time " << dendl;
       return -EINVAL;
     }
   }
@@ -937,7 +959,7 @@ int RGWHTTPStreamRWRequest::complete_request(optional_yield y,
       string mtime_str;
       set_str_from_headers(out_headers, "RGWX_MTIME", mtime_str);
       if (!mtime_str.empty()) {
-        int ret = parse_rgwx_mtime(cct, mtime_str, mtime);
+        int ret = parse_rgwx_mtime(this, cct, mtime_str, mtime);
         if (ret < 0) {
           return ret;
         }
@@ -951,7 +973,7 @@ int RGWHTTPStreamRWRequest::complete_request(optional_yield y,
       string err;
       *psize = strict_strtoll(size_str.c_str(), 10, &err);
       if (!err.empty()) {
-        ldout(cct, 0) << "ERROR: failed parsing embedded metadata object size (" << size_str << ") to int " << dendl;
+        ldpp_dout(this, 0) << "ERROR: failed parsing embedded metadata object size (" << size_str << ") to int " << dendl;
         return -EIO;
       }
     }
@@ -990,7 +1012,7 @@ int RGWHTTPStreamRWRequest::handle_header(const string& name, const string& val)
     string err;
     long len = strict_strtol(val.c_str(), 10, &err);
     if (!err.empty()) {
-      ldout(cct, 0) << "ERROR: failed converting embedded metadata len (" << val << ") to int " << dendl;
+      ldpp_dout(this, 0) << "ERROR: failed converting embedded metadata len (" << val << ") to int " << dendl;
       return -EINVAL;
     }
 

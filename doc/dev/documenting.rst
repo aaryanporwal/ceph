@@ -5,7 +5,7 @@
 User documentation
 ==================
 
-The documentation on docs.ceph.com is generated from the restructuredText
+The documentation on docs.ceph.com is generated from the reStructuredText
 sources in ``/doc/`` in the Ceph git repository.
 
 Please make sure that your changes are written in a way that is intended
@@ -42,7 +42,7 @@ The general format for function documentation is
    *
    * Detailed description when necessary
    *
-   * preconditons, postconditions, warnings, bugs or other notes
+   * preconditions, postconditions, warnings, bugs or other notes
    *
    * parameter reference
    * return value (if non-void)
@@ -128,7 +128,7 @@ Inkscape
 --------
 
 You can use Inkscape to generate scalable vector graphics.
-https://inkscape.org/en/ for restructedText documents.
+https://inkscape.org/en/ for restructuredText documents.
 
 If you generate diagrams with Inkscape, you should
 commit both the Scalable Vector Graphics (SVG) file and export a

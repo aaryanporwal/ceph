@@ -15,18 +15,24 @@
 #include "node_impl.h"
 #include "stages/node_stage_layout.h"
 
+SET_SUBSYS(seastore_onode);
+
 namespace crimson::os::seastore::onode {
 /*
  * tree_cursor_t
  */
 
+// create from insert
 tree_cursor_t::tree_cursor_t(Ref<LeafNode> node, const search_position_t& pos)
       : ref_leaf_node{node}, position{pos}, cache{ref_leaf_node}
 {
   assert(is_tracked());
   ref_leaf_node->do_track_cursor<true>(*this);
+  // do not account updates for the inserted values
+  is_mutated = true;
 }
 
+// create from lookup
 tree_cursor_t::tree_cursor_t(
     Ref<LeafNode> node, const search_position_t& pos,
     const key_view_t& key_view, const value_header_t* p_value_header)
@@ -37,6 +43,7 @@ tree_cursor_t::tree_cursor_t(
   ref_leaf_node->do_track_cursor<true>(*this);
 }
 
+// lookup reaches the end, contain leaf node for further insert
 tree_cursor_t::tree_cursor_t(Ref<LeafNode> node)
       : ref_leaf_node{node}, position{search_position_t::end()}, cache{ref_leaf_node}
 {
@@ -44,6 +51,7 @@ tree_cursor_t::tree_cursor_t(Ref<LeafNode> node)
   assert(ref_leaf_node->is_level_tail());
 }
 
+// create an invalid tree_cursor_t
 tree_cursor_t::~tree_cursor_t()
 {
   if (is_tracked()) {
@@ -400,8 +408,9 @@ void Node::test_make_destructable(
 eagain_ifuture<> Node::mkfs(context_t c, RootNodeTracker& root_tracker)
 {
   LOG_PREFIX(OTree::Node::mkfs);
-  return LeafNode::allocate_root(c, L_ADDR_MIN, root_tracker
+  return LeafNode::allocate_root(c, root_tracker
   ).si_then([c, FNAME](auto ret) {
+    c.t.get_onode_tree_stats().extents_num_delta++;
     INFOT("allocated root {}", c.t, ret->get_name());
   });
 }
@@ -439,6 +448,7 @@ void Node::make_root(context_t c, Super::URef&& _super)
 {
   _super->write_root_laddr(c, impl->laddr());
   as_root(std::move(_super));
+  c.t.get_onode_tree_stats().depth = static_cast<uint64_t>(level()) + 1;
 }
 
 void Node::as_root(Super::URef&& _super)
@@ -596,15 +606,15 @@ Node::try_merge_adjacent(
         } else {
           update_index_after_merge = update_parent_index;
         }
-        INFOT("merge {} and {} at merge_stage={}, merge_size={}B, "
-              "update_index={}, is_left={} ...",
-              c.t, left_for_merge->get_name(), right_for_merge->get_name(),
-              merge_stage, merge_size, update_index_after_merge, is_left);
+        DEBUGT("merge {} and {} at merge_stage={}, merge_size={}B, "
+               "update_index={}, is_left={} ...",
+               c.t, left_for_merge->get_name(), right_for_merge->get_name(),
+               merge_stage, merge_size, update_index_after_merge, is_left);
         // we currently cannot generate delta depends on another extent content,
         // so use rebuild_extent() as a workaround to rebuild the node from a
         // fresh extent, thus no need to generate delta.
         auto left_addr = left_for_merge->impl->laddr();
-        return left_for_merge->rebuild_extent(c, L_ADDR_MIN
+        return left_for_merge->rebuild_extent(c
         ).si_then([c, update_index_after_merge,
                      left_addr,
                      merge_stage = merge_stage,
@@ -618,6 +628,7 @@ Node::try_merge_adjacent(
           search_position_t left_last_pos = left_for_merge->impl->merge(
               left_mut, *right_for_merge->impl, merge_stage, merge_size);
           left_for_merge->track_merge(right_for_merge, merge_stage, left_last_pos);
+	  --(c.t.get_onode_tree_stats().extents_num_delta);
           return left_for_merge->parent_info().ptr->apply_children_merge(
               c, std::move(left_for_merge), left_addr,
               std::move(right_for_merge), update_index_after_merge);
@@ -743,7 +754,7 @@ eagain_ifuture<Ref<Node>> Node::load(
   });
 }
 
-eagain_ifuture<NodeExtentMutable> Node::rebuild_extent(context_t c, laddr_t hint)
+eagain_ifuture<NodeExtentMutable> Node::rebuild_extent(context_t c)
 {
   LOG_PREFIX(OTree::Node::rebuild_extent);
   DEBUGT("{} ...", c.t, get_name());
@@ -752,7 +763,7 @@ eagain_ifuture<NodeExtentMutable> Node::rebuild_extent(context_t c, laddr_t hint
 
   // note: laddr can be changed after rebuild, but we don't fix the parent
   // mapping as it is part of the merge process.
-  return impl->rebuild_extent(c, hint);
+  return impl->rebuild_extent(c);
 }
 
 eagain_ifuture<> Node::retire(context_t c, Ref<Node>&& this_ref)
@@ -904,10 +915,10 @@ eagain_ifuture<> InternalNode::erase_child(context_t c, Ref<Node>&& child_ref)
                (auto&& new_tail_child) mutable {
     auto child_pos = child_ref->parent_info().position;
     if (new_tail_child) {
-      INFOT("erase {}'s child {} at pos({}), "
-            "and fix new child tail {} at pos({}) ...",
-            c.t, get_name(), child_ref->get_name(), child_pos,
-            new_tail_child->get_name(), new_tail_child->parent_info().position);
+      DEBUGT("erase {}'s child {} at pos({}), "
+             "and fix new child tail {} at pos({}) ...",
+             c.t, get_name(), child_ref->get_name(), child_pos,
+             new_tail_child->get_name(), new_tail_child->parent_info().position);
       assert(!new_tail_child->impl->is_level_tail());
       new_tail_child->make_tail(c);
       assert(new_tail_child->impl->is_level_tail());
@@ -916,8 +927,8 @@ eagain_ifuture<> InternalNode::erase_child(context_t c, Ref<Node>&& child_ref)
         new_tail_child.reset();
       }
     } else {
-      INFOT("erase {}'s child {} at pos({}) ...",
-            c.t, get_name(), child_ref->get_name(), child_pos);
+      DEBUGT("erase {}'s child {} at pos({}) ...",
+             c.t, get_name(), child_ref->get_name(), child_pos);
     }
 
     Ref<Node> this_ref = child_ref->deref_parent();
@@ -1228,6 +1239,7 @@ eagain_ifuture<Ref<InternalNode>> InternalNode::allocate_root(
     fresh_node.mut.copy_in_absolute(
         const_cast<laddr_packed_t*>(p_value), old_root_addr);
     root->make_root_from(c, std::move(super), old_root_addr);
+    ++(c.t.get_onode_tree_stats().extents_num_delta);
     return root;
   });
 }
@@ -1437,6 +1449,7 @@ eagain_ifuture<> InternalNode::try_downgrade_root(
     child->deref_parent();
     auto super_to_move = deref_super();
     child->make_root_from(c, std::move(super_to_move), impl->laddr());
+    --(c.t.get_onode_tree_stats().extents_num_delta);
     return retire(c, std::move(this_ref));
   });
 }
@@ -1489,21 +1502,29 @@ eagain_ifuture<Ref<InternalNode>> InternalNode::insert_or_split(
 
   // proceed to split with insert
   // assume I'm already ref-counted by caller
-  auto hint = insert_key.get_hint();
-  return (is_root() ? upgrade_root(c, hint) : eagain_iertr::now()
-  ).si_then([this, c, hint] {
+  laddr_t left_hint, right_hint;
+  {
+    key_view_t left_key;
+    impl->get_slot(search_position_t::begin(), &left_key, nullptr);
+    left_hint = left_key.get_hint();
+    key_view_t right_key;
+    impl->get_largest_slot(nullptr, &right_key, nullptr);
+    right_hint = right_key.get_hint();
+  }
+  return (is_root() ? upgrade_root(c, left_hint) : eagain_iertr::now()
+  ).si_then([this, c, right_hint] {
     return InternalNode::allocate(
-        c, hint, impl->field_type(), impl->is_level_tail(), impl->level());
+        c, right_hint, impl->field_type(), impl->is_level_tail(), impl->level());
   }).si_then([this, insert_key, insert_child, insert_pos,
                 insert_stage=insert_stage, insert_size=insert_size,
                 outdated_child, c, FNAME](auto fresh_right) mutable {
     // I'm the left_node and need to split into the right_node
     auto right_node = fresh_right.node;
-    INFOT("proceed split {} to fresh {} with insert_child={},"
-          " outdated_child={} ...",
-          c.t, get_name(), right_node->get_name(),
-          insert_child->get_name(),
-          (outdated_child ? outdated_child->get_name() : "N/A"));
+    DEBUGT("proceed split {} to fresh {} with insert_child={},"
+           " outdated_child={} ...",
+           c.t, get_name(), right_node->get_name(),
+           insert_child->get_name(),
+           (outdated_child ? outdated_child->get_name() : "N/A"));
     auto insert_value = insert_child->impl->laddr();
     auto [split_pos, is_insert_left, p_value] = impl->split_insert(
         fresh_right.mut, *right_node->impl, insert_key, insert_value,
@@ -1534,6 +1555,7 @@ eagain_ifuture<Ref<InternalNode>> InternalNode::insert_or_split(
       validate_tracked_children();
       right_node->validate_tracked_children();
     }
+    ++(c.t.get_onode_tree_stats().extents_num_delta);
     return right_node;
   });
 }
@@ -1813,6 +1835,7 @@ LeafNode::erase(context_t c, const search_position_t& pos, bool get_next)
   Ref<Node> this_ref = this;
   DEBUGT("erase {}'s pos({}), get_next={} ...",
          c.t, get_name(), pos, get_next);
+  ++(c.t.get_onode_tree_stats().num_erases);
 
   // get the next cursor
   return eagain_iertr::now().si_then([c, &pos, get_next, this] {
@@ -2043,6 +2066,7 @@ eagain_ifuture<Ref<tree_cursor_t>> LeafNode::insert_value(
   DEBUGT("insert {} with insert_key={}, insert_value={}, insert_pos({}), "
          "history={}, mstat({}) ...",
          c.t, get_name(), key, vconf, pos, history, mstat);
+  ++(c.t.get_onode_tree_stats().num_inserts);
   search_position_t insert_pos = pos;
   auto [insert_stage, insert_size] = impl->evaluate_insert(
       key, vconf, history, mstat, insert_pos);
@@ -2061,15 +2085,23 @@ eagain_ifuture<Ref<tree_cursor_t>> LeafNode::insert_value(
   }
   // split and insert
   Ref<Node> this_ref = this;
-  auto hint = key.get_hint();
-  return (is_root() ? upgrade_root(c, hint) : eagain_iertr::now()
-  ).si_then([this, c, hint] {
-    return LeafNode::allocate(c, hint, impl->field_type(), impl->is_level_tail());
+  laddr_t left_hint, right_hint;
+  {
+    key_view_t left_key;
+    impl->get_slot(search_position_t::begin(), &left_key, nullptr);
+    left_hint = left_key.get_hint();
+    key_view_t right_key;
+    impl->get_largest_slot(nullptr, &right_key, nullptr);
+    right_hint = right_key.get_hint();
+  }
+  return (is_root() ? upgrade_root(c, left_hint) : eagain_iertr::now()
+  ).si_then([this, c, right_hint] {
+    return LeafNode::allocate(c, right_hint, impl->field_type(), impl->is_level_tail());
   }).si_then([this_ref = std::move(this_ref), this, c, &key, vconf, FNAME,
                 insert_pos, insert_stage=insert_stage, insert_size=insert_size](auto fresh_right) mutable {
     auto right_node = fresh_right.node;
-    INFOT("proceed split {} to fresh {} ...",
-          c.t, get_name(), right_node->get_name());
+    DEBUGT("proceed split {} to fresh {} ...",
+           c.t, get_name(), right_node->get_name());
     // no need to bump version for right node, as it is fresh
     on_layout_change();
     impl->prepare_mutate(c);
@@ -2087,6 +2119,7 @@ eagain_ifuture<Ref<tree_cursor_t>> LeafNode::insert_value(
     validate_tracked_cursors();
     right_node->validate_tracked_cursors();
 
+    ++(c.t.get_onode_tree_stats().extents_num_delta);
     return apply_split_to_parent(
         c, std::move(this_ref), std::move(right_node), false
     ).si_then([ret] {
@@ -2098,10 +2131,10 @@ eagain_ifuture<Ref<tree_cursor_t>> LeafNode::insert_value(
 }
 
 eagain_ifuture<Ref<LeafNode>> LeafNode::allocate_root(
-    context_t c, laddr_t hint, RootNodeTracker& root_tracker)
+    context_t c, RootNodeTracker& root_tracker)
 {
   LOG_PREFIX(OTree::LeafNode::allocate_root);
-  return LeafNode::allocate(c, hint, field_type_t::N0, true
+  return LeafNode::allocate(c, L_ADDR_MIN, field_type_t::N0, true
   ).si_then([c, &root_tracker, FNAME](auto fresh_node) {
     auto root = fresh_node.node;
     return c.nm.get_super(c.t, root_tracker
@@ -2128,7 +2161,8 @@ Ref<tree_cursor_t> LeafNode::get_or_track_cursor(
   Ref<tree_cursor_t> p_cursor;
   auto found = tracked_cursors.find(position);
   if (found == tracked_cursors.end()) {
-    p_cursor = tree_cursor_t::create(this, position, key, p_value_header);
+    p_cursor = tree_cursor_t::create_tracked(
+        this, position, key, p_value_header);
   } else {
     p_cursor = found->second;
     assert(p_cursor->get_leaf_node() == this);
@@ -2178,7 +2212,8 @@ Ref<tree_cursor_t> LeafNode::track_insert(
   // track insert
   // TODO: getting key_view_t from stage::proceed_insert() and
   // stage::append_insert() has not supported yet
-  return tree_cursor_t::create(this, insert_pos);
+  return tree_cursor_t::create_inserted(
+      this, insert_pos);
 }
 
 void LeafNode::track_split(

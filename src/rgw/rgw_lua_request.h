@@ -2,12 +2,13 @@
 
 #include <string>
 #include "include/common_fwd.h"
+#include "rgw_sal_fwd.h"
 
-class req_state;
+struct req_state;
 class RGWREST;
-class OpsLogSocket;
-namespace rgw::sal {
-  class Store;
+class OpsLogSink;
+namespace rgw::lua {
+  class Background;
 }
 
 namespace rgw::lua::request {
@@ -16,10 +17,11 @@ namespace rgw::lua::request {
 int execute(
     rgw::sal::Store* store,
     RGWREST* rest,
-    OpsLogSocket* olog,
+    OpsLogSink* olog,
     req_state *s, 
     const char* op_name,
-    const std::string& script);
+    const std::string& script,
+    rgw::lua::Background* background = nullptr);
 
 }
 

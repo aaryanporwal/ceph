@@ -104,7 +104,8 @@ Each frame has a 32-byte preamble::
     __le32 segment length
     __le16 segment alignment
   } * 4
-  reserved (2 bytes)
+  __u8 flags
+  reserved (1 byte)
   __le32 preamble crc
 
 An empty frame has one empty segment.  A non-empty frame can have
@@ -113,6 +114,10 @@ empty.
 
 If there are less than four segments, unused (trailing) segment
 length and segment alignment fields are zeroed.
+
+### Currently supported flags
+
+  1. FRAME_EARLY_DATA_COMPRESSED (see :ref:`msgr-post-compression`)
 
 The reserved bytes are zeroed.
 
@@ -528,6 +533,64 @@ where epilogue is::
 
 late_status has the same meaning as in msgr2.1-crc mode.
 
+Compression
+-----------
+Compression handshake is implemented using msgr2 feature-based handshaking.
+In this phase, the client will indicate the server if on-wire-compression can be used for message transmitting, 
+in addition to the list of supported compression methods. If on-wire-compression is enabled for both client and server, 
+the server will choose a compression method based on client's request and its' own preferences. 
+Once the handshake is completed, both peers have setup their compression handlers (if desired). 
+
+* TAG_COMPRESSION_REQUEST (client->server): declares compression capabilities and requirements::
+
+    bool  is_compress
+    std::vector<uint32_t> preferred_methods 
+
+  - if the client identifies that both peers support compression feature, it initiates the handshake.
+  - is_compress flag indicates whether the client's configuration is to use compression.
+  - preferred_methods is a list of compression algorithms that are supported by the client.
+
+* TAG_COMPRESSION_DONE (server->client) : determines on compression settings::
+
+    bool is_compress
+    uint32_t  method
+
+  - the server determines whether compression is possible according to the configuration.
+  - if it is possible, it will pick the most prioritized compression method that is also supported by the client.
+  - if none exists, it will determine that session between the peers will be handled without compression.
+
+.. ditaa::
+
+           +---------+              +--------+
+           | Client  |              | Server |
+           +---------+              +--------+
+                | compression request    |
+                |----------------------->|
+                |<-----------------------|
+                |   compression done     |
+
+# msgr2.x-secure mode
+
+Combining compression with encryption introduces security implications.
+Compression will not be possible when using secure mode, unless configured specifically by an admin. 
+
+.. _msgr-post-compression:
+
+Post-compression frame format 
+-----------------------------
+Depending on the negotiated connection mode from TAG_COMPRESSION_DONE, the connection is able to accept/send compressed frames or process all frames as decompressed.
+
+# msgr2.x-force mode
+
+All subsequent frames that will be sent via the connection will be compressed if compression requirements are met (e.g, the frames size).
+
+For compressed frames, the sending peer will enable the FRAME_EARLY_DATA_COMPRESSED flag, thus allowing the accepting peer to detect it and decompress the frame.
+
+# msgr2.x-none mode
+
+FRAME_EARLY_DATA_COMPRESSED flag will be disabled in preamble.
+
+
 Message flow handshake
 ----------------------
 
@@ -551,7 +614,7 @@ an established session.
   - the target addr is who the client is trying to connect *to*, so
     that the server side can close the connection if the client is
     talking to the wrong daemon.
-  - type.gid (entity_name_t) is set here, by combinging the type shared in the hello
+  - type.gid (entity_name_t) is set here, by combining the type shared in the hello
     frame with the gid here.  this means we don't need it
     in the header of every message.  it also means that we can't send
     messages "from" other entity_name_t's.  the current
@@ -559,7 +622,7 @@ an established session.
     shouldn't break any existing functionality.  implementation will
     likely want to mask this against what the authenticated credential
     allows.
-  - cookie is the client coookie used to identify a session, and can be used
+  - cookie is the client cookie used to identify a session, and can be used
     to reconnect to an existing session.
   - we've dropped the 'protocol_version' field from msgr1
 

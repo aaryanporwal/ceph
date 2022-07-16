@@ -451,6 +451,40 @@ static inline int parse_v4_auth_header(const req_info& info,               /* in
   return 0;
 }
 
+bool is_non_s3_op(RGWOpType op_type)
+{
+  if (op_type == RGW_STS_GET_SESSION_TOKEN ||
+      op_type == RGW_STS_ASSUME_ROLE ||
+      op_type == RGW_STS_ASSUME_ROLE_WEB_IDENTITY ||
+      op_type == RGW_OP_CREATE_ROLE ||
+      op_type == RGW_OP_DELETE_ROLE ||
+      op_type == RGW_OP_GET_ROLE ||
+      op_type == RGW_OP_MODIFY_ROLE ||
+      op_type == RGW_OP_LIST_ROLES ||
+      op_type == RGW_OP_PUT_ROLE_POLICY ||
+      op_type == RGW_OP_GET_ROLE_POLICY ||
+      op_type == RGW_OP_LIST_ROLE_POLICIES ||
+      op_type == RGW_OP_DELETE_ROLE_POLICY ||
+      op_type == RGW_OP_PUT_USER_POLICY ||
+      op_type == RGW_OP_GET_USER_POLICY ||
+      op_type == RGW_OP_LIST_USER_POLICIES ||
+      op_type == RGW_OP_DELETE_USER_POLICY ||
+      op_type == RGW_OP_CREATE_OIDC_PROVIDER ||
+      op_type == RGW_OP_DELETE_OIDC_PROVIDER ||
+      op_type == RGW_OP_GET_OIDC_PROVIDER ||
+      op_type == RGW_OP_LIST_OIDC_PROVIDERS ||
+      op_type == RGW_OP_PUBSUB_TOPIC_CREATE ||
+      op_type == RGW_OP_PUBSUB_TOPICS_LIST ||
+      op_type == RGW_OP_PUBSUB_TOPIC_GET ||
+      op_type == RGW_OP_PUBSUB_TOPIC_DELETE ||
+      op_type == RGW_OP_TAG_ROLE ||
+      op_type == RGW_OP_LIST_ROLE_TAGS ||
+      op_type == RGW_OP_UNTAG_ROLE) {
+    return true;
+  }
+  return false;
+}
+
 int parse_v4_credentials(const req_info& info,                     /* in */
 			 std::string_view& access_key_id,        /* out */
 			 std::string_view& credential_scope,     /* out */
@@ -576,11 +610,12 @@ std::string get_v4_canonical_qs(const req_info& info, const bool using_qs)
 }
 
 static void add_v4_canonical_params_from_map(const map<string, string>& m,
-                                        std::map<string, string> *result)
+                                        std::map<string, string> *result,
+                                        bool is_non_s3_op)
 {
   for (auto& entry : m) {
     const auto& key = entry.first;
-    if (key.empty()) {
+    if (key.empty() || (is_non_s3_op && key == "PayloadHash")) {
       continue;
     }
 
@@ -588,12 +623,12 @@ static void add_v4_canonical_params_from_map(const map<string, string>& m,
   }
 }
 
-std::string gen_v4_canonical_qs(const req_info& info)
+std::string gen_v4_canonical_qs(const req_info& info, bool is_non_s3_op)
 {
   std::map<std::string, std::string> canonical_qs_map;
 
-  add_v4_canonical_params_from_map(info.args.get_params(), &canonical_qs_map);
-  add_v4_canonical_params_from_map(info.args.get_sys_params(), &canonical_qs_map);
+  add_v4_canonical_params_from_map(info.args.get_params(), &canonical_qs_map, is_non_s3_op);
+  add_v4_canonical_params_from_map(info.args.get_sys_params(), &canonical_qs_map, false);
 
   if (canonical_qs_map.empty()) {
     return string();

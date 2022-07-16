@@ -32,14 +32,13 @@ void RGWObjTagEntry_S3::dump_xml(Formatter *f) const {
 void RGWObjTagSet_S3::decode_xml(XMLObj *obj) {
   vector<RGWObjTagEntry_S3> entries;
 
-  RGWXMLDecoder::decode_xml("Tag", entries, obj, true);
+  bool mandatory{false};
+  RGWXMLDecoder::decode_xml("Tag", entries, obj, mandatory);
 
   for (auto& entry : entries) {
     const std::string& key = entry.get_key();
     const std::string& val = entry.get_val();
-    if (!add_tag(key,val)) {
-      throw RGWXMLDecoder::err("failed to add tag");
-    }
+    add_tag(key,val);
   }
 }
 

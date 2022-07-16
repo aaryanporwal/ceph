@@ -12,7 +12,7 @@ How can the configuration be set? Well, there are several sources:
  - command line arguments::
 
     --debug-ms=1
-    --debug-pg=10
+    --debug-monc=10
 
    etc.
  - arguments injected at runtime using ``injectargs`` or ``config set``
@@ -62,7 +62,7 @@ Reading configuration values
 There are two ways for Ceph code to get configuration values. One way is to
 read it directly from a variable named ``g_conf``, or equivalently,
 ``g_ceph_ctx->_conf``. The other is to register an observer that will be called
-every time the relevant configuration values changes. This observer will be
+every time the relevant configuration values change. This observer will be
 called soon after the initial configuration is read, and every time after that
 when one of the relevant values changes. Each observer tracks a set of keys
 and is invoked only when one of the relevant keys changes.

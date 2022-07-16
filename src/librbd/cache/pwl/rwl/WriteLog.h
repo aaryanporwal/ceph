@@ -7,6 +7,7 @@
 #include <functional>
 #include <libpmemobj.h>
 #include <list>
+#include "common/Timer.h"
 #include "common/RWLock.h"
 #include "common/WorkQueue.h"
 #include "common/AsyncOpTracker.h"
@@ -21,7 +22,6 @@
 #include "librbd/cache/pwl/rwl/Builder.h"
 
 class Context;
-class SafeTimer;
 
 namespace librbd {
 
@@ -70,7 +70,8 @@ private:
   void flush_op_log_entries(pwl::GenericLogOperationsVector &ops);
   template <typename V>
   void flush_pmem_buffer(V& ops);
-
+  void inc_allocated_cached_bytes(
+      std::shared_ptr<pwl::GenericLogEntry> log_entry) override;
 protected:
   using AbstractWriteLog<ImageCtxT>::m_lock;
   using AbstractWriteLog<ImageCtxT>::m_log_entries;
@@ -101,8 +102,9 @@ protected:
   void setup_schedule_append(
       pwl::GenericLogOperationsVector &ops, bool do_early_flush,
       C_BlockIORequestT *req) override;
-  Context *construct_flush_entry_ctx(
-        const std::shared_ptr<pwl::GenericLogEntry> log_entry) override;
+  void construct_flush_entries(pwl::GenericLogEntries entries_to_flush,
+				DeferredContexts &post_unlock,
+				bool has_write_entry) override;
   bool initialize_pool(Context *on_finish, pwl::DeferredContexts &later) override;
   void write_data_to_buffer(
       std::shared_ptr<pwl::WriteLogEntry> ws_entry,

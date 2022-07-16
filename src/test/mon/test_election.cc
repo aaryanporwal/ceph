@@ -1,4 +1,4 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
 #include "gtest/gtest.h"
@@ -147,7 +147,7 @@ struct Owner : public ElectionOwner, RankProvider {
     logic.start();
   }
   bool ever_participated() const { return ever_joined; }
-  unsigned paxos_size() const { return parent->get_paxos_size(); }
+  int paxos_size() const { return parent->get_paxos_size(); }
   const set<int>& get_disallowed_leaders() const {
     return parent->get_disallowed_leaders();
   }

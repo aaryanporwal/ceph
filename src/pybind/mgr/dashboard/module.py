@@ -19,13 +19,13 @@ if TYPE_CHECKING:
     else:
         from typing_extensions import Literal
 
-from mgr_module import CLIWriteCommand, HandleCommandResult, MgrModule, \
-    MgrStandbyModule, Option, _get_localized_key
+from mgr_module import CLIReadCommand, CLIWriteCommand, HandleCommandResult, \
+    MgrModule, MgrStandbyModule, NotifyType, Option, _get_localized_key
 from mgr_util import ServerConfigException, build_url, \
     create_self_signed_cert, get_default_addr, verify_tls_files
 
 from . import mgr
-from .controllers import generate_routes, json_error_page
+from .controllers import Router, json_error_page
 from .grafana import push_local_dashboards
 from .services.auth import AuthManager, AuthManagerTool, JwtManager
 from .services.exception import dashboard_exception_handler
@@ -107,8 +107,6 @@ class CherryPyConfig(object):
         else:
             server_port = self.get_localized_module_option('ssl_server_port', 8443)  # type: ignore
 
-        if server_addr == '::':
-            server_addr = self.get_mgr_ip()  # type: ignore
         if server_addr is None:
             raise ServerConfigException(
                 'no server_addr configured; '
@@ -191,6 +189,8 @@ class CherryPyConfig(object):
         self._url_prefix = prepare_url_prefix(self.get_module_option(  # type: ignore
             'url_prefix', default=''))
 
+        if server_addr in ['::', '0.0.0.0']:
+            server_addr = self.get_mgr_ip()  # type: ignore
         base_url = build_url(
             scheme='https' if use_ssl else 'http',
             host=server_addr,
@@ -274,6 +274,8 @@ class Module(MgrModule, CherryPyConfig):
     for options in PLUGIN_MANAGER.hook.get_options() or []:
         MODULE_OPTIONS.extend(options)
 
+    NOTIFY_TYPES = [NotifyType.clog]
+
     __pool_stats = collections.defaultdict(lambda: collections.defaultdict(
         lambda: collections.deque(maxlen=10)))  # type: dict
 
@@ -336,7 +338,7 @@ class Module(MgrModule, CherryPyConfig):
         # about to start serving
         self.set_uri(uri)
 
-        mapper, parent_urls = generate_routes(self.url_prefix)
+        mapper, parent_urls = Router.generate_routes(self.url_prefix)
 
         config = {}
         for purl in parent_urls:
@@ -415,6 +417,39 @@ class Module(MgrModule, CherryPyConfig):
 
         return 0, 'RGW credentials configured', ''
 
+    @CLIWriteCommand("dashboard set-login-banner")
+    def set_login_banner(self, inbuf: str):
+        '''
+        Set the custom login banner read from -i <file>
+        '''
+        item_label = 'login banner file'
+        if inbuf is None:
+            return HandleCommandResult(
+                -errno.EINVAL,
+                stderr=f'Please specify the {item_label} with "-i" option'
+            )
+        mgr.set_store('custom_login_banner', inbuf)
+        return HandleCommandResult(stdout=f'{item_label} added')
+
+    @CLIReadCommand("dashboard get-login-banner")
+    def get_login_banner(self):
+        '''
+        Get the custom login banner text
+        '''
+        banner_text = mgr.get_store('custom_login_banner')
+        if banner_text is None:
+            return HandleCommandResult(stdout='No login banner set')
+        else:
+            return HandleCommandResult(stdout=banner_text)
+
+    @CLIWriteCommand("dashboard unset-login-banner")
+    def unset_login_banner(self):
+        '''
+        Unset the custom login banner
+        '''
+        mgr.set_store('custom_login_banner', None)
+        return HandleCommandResult(stdout='Login banner removed')
+
     def handle_command(self, inbuf, cmd):
         # pylint: disable=too-many-return-statements
         res = handle_option_command(cmd, inbuf)
@@ -436,8 +471,8 @@ class Module(MgrModule, CherryPyConfig):
         return (-errno.EINVAL, '', 'Command not found \'{0}\''
                 .format(cmd['prefix']))
 
-    def notify(self, notify_type, notify_id):
-        NotificationQueue.new_notification(notify_type, notify_id)
+    def notify(self, notify_type: NotifyType, notify_id):
+        NotificationQueue.new_notification(str(notify_type), notify_id)
 
     def get_updated_pool_stats(self):
         df = self.get('df')
@@ -482,6 +517,13 @@ class StandbyModule(MgrStandbyModule, CherryPyConfig):
             def default(self, *args, **kwargs):
                 if module.get_module_option('standby_behaviour', 'redirect') == 'redirect':
                     active_uri = module.get_active_uri()
+
+                    if cherrypy.request.path_info.startswith('/api/prometheus_receiver'):
+                        module.log.debug("Suppressed redirecting alert to active '%s'",
+                                         active_uri)
+                        cherrypy.response.status = 204
+                        return None
+
                     if active_uri:
                         module.log.info("Redirecting to active '%s'", active_uri)
                         raise cherrypy.HTTPRedirect(active_uri)

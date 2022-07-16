@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "common/Timer.h"
 #include "common/ceph_mutex.h"
 #include "common/config_proxy.h"
 #include "common/event_socket.h"
@@ -34,8 +35,6 @@
 
 #include <boost/lockfree/policies.hpp>
 #include <boost/lockfree/queue.hpp>
-
-class SafeTimer;
 
 namespace neorados {
 class IOContext;
@@ -76,8 +75,8 @@ namespace librbd {
     struct SnapKeyComparator {
       inline bool operator()(const SnapKey& lhs, const SnapKey& rhs) const {
         // only compare by namespace type and name
-        if (lhs.first.which() != rhs.first.which()) {
-          return lhs.first.which() < rhs.first.which();
+        if (lhs.first.index() != rhs.first.index()) {
+          return lhs.first.index() < rhs.first.index();
         }
         return lhs.second < rhs.second;
       }

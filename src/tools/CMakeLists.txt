@@ -48,6 +48,7 @@ install(TARGETS ceph-osdomap-tool DESTINATION bin)
 
 add_executable(ceph-monstore-tool
   ceph_monstore_tool.cc
+  ../auth/cephx/CephxKeyServer.cc
   ../mgr/mgr_commands.cc)
 target_link_libraries(ceph-monstore-tool os global Boost::program_options)
 install(TARGETS ceph-monstore-tool DESTINATION bin)
@@ -95,6 +96,8 @@ set(osdomaptool_srcs osdmaptool.cc)
 add_executable(osdmaptool ${osdomaptool_srcs})
 target_link_libraries(osdmaptool global)
 install(TARGETS osdmaptool DESTINATION bin)
+
+install(PROGRAMS crushdiff DESTINATION bin)
 
 set(ceph-diff-sorted_srcs ceph-diff-sorted.cc)
 add_executable(ceph-diff-sorted ${ceph-diff-sorted_srcs})
